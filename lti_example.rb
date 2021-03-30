@@ -24,9 +24,9 @@ $oauth_secret = "secret"
 
 # sinatra wants to set x-frame-options by default, disable it
 disable :protection
-# enable sessions so we can remember the launch info between http requests, as
-# the user takes the assessment
-enable :sessions
+
+# sessions was not working in chrome and I'm using a constant for now
+SESSION = {}
 
 # this is the entry action that Canvas (the LTI Tool Consumer) sends the
 # browser to when launching the tool.
@@ -44,31 +44,26 @@ post "/assessment/start" do
   # make sure this is an assignment tool launch, not another type of launch.
   # only assignment tools support the outcome service, since only they appear
   # in the Canvas gradebook.
-  unless params['lis_outcome_service_url'] && params['lis_result_sourcedid']
-    return %{It looks like this LTI tool wasn't launched as an assignment, or you are trying to take it as a teacher rather than as a a student. Make sure to set up an external tool assignment as outlined <a target="_blank" href="https://github.com/instructure/lti_example">in the README</a> for this example.}
+  unless params['lis_outcome_service_url']
+    return %{It looks like this LTI tool wasn't launched as an assignment. Make sure to set up an external tool assignment as outlined <a target="_blank" href="https://github.com/instructure/lti_example">in the README</a> for this example.}
   end
 
   # store the relevant parameters from the launch into the user's session, for
   # access during subsequent http requests.
   # note that the name and email might be blank, if the tool wasn't configured
   # in Canvas to provide that private information.
-  %w(lis_outcome_service_url lis_result_sourcedid lis_person_name_full lis_person_contact_email_primary).each { |v| session[v] = params[v] }
+  %w(lis_outcome_service_url lis_person_name_full lis_person_contact_email_primary).each { |v| SESSION[v] = params[v] }
 
   # that's it, setup is done. now send them to the assessment!
   redirect to("/assessment")
 end
 
 def username
-  session['lis_person_name_full'] || 'Student'
+  SESSION['lis_person_name_full'] || 'Student'
 end
 
 get "/assessment" do
-  # first make sure they got here through a tool launch
-  unless session['lis_result_sourcedid']
-    return %{You need to take this assessment through Canvas.}
-  end
-
-  # now render a simple form the user will submit to "take the quiz"
+  # render a simple form the user will submit to "take the quiz"
   <<-HTML
   <html>
     <head><title>Demo LTI Assessment Tool</title></head>
@@ -76,7 +71,10 @@ get "/assessment" do
       <h1>Demo LTI Assessment Tool</h1>
       <form action="/assessment" method="post">
         <p>Hi, #{username}. On a scale of <code>0.0</code> to <code>1.0</code>, how well would you say you did on this assessment?</p>
-        <input name='score' type='text' width='5' id='score' />
+        <label>SourcedId (tool.id-course.id-assignment.id-user.id-hmac_sha1)</label></br>
+        <input name='sourcedId' type='text' id='sourcedId' style='width: 350px'/></br>
+        <label>Score</label></br>
+        <input name='score' type='text' width='5' id='score' value="1" /></br>
         <input type='submit' value='Submit' />
         <p>If you want to enter an invalid score here, you can see how Canvas will reject it.</p>
       </form>
@@ -90,7 +88,9 @@ end
 post "/assessment" do
   # obviously in a real tool, we're not going to let the user input their own score
   score = params['score']
-  if !score || score.empty?
+  sourcedId = params['sourcedId']
+
+  if !score || score.empty? || !sourcedId || sourcedId.empty?
     redirect to("/assessment")
   end
 
@@ -99,7 +99,7 @@ post "/assessment" do
   # content-type to application/xml.
   xml = %{
 <?xml version = "1.0" encoding = "UTF-8"?>
-<imsx_POXEnvelopeRequest xmlns = "http://www.imsglobal.org/lis/oms1p0/pox">
+<imsx_POXEnvelopeRequest xmlns = "http://www.imsglobal.org/services/ltiv1p1/xsd/imsoms_v1p0">
   <imsx_POXHeader>
     <imsx_POXRequestHeaderInfo>
       <imsx_version>V1.0</imsx_version>
@@ -110,7 +110,7 @@ post "/assessment" do
     <replaceResultRequest>
       <resultRecord>
         <sourcedGUID>
-          <sourcedId>#{session['lis_result_sourcedid']}</sourcedId>
+          <sourcedId>#{sourcedId}</sourcedId>
         </sourcedGUID>
         <result>
           <resultScore>
@@ -125,7 +125,7 @@ post "/assessment" do
   }
   consumer = OAuth::Consumer.new($oauth_key, $oauth_secret)
   token = OAuth::AccessToken.new(consumer)
-  response = token.post(session['lis_outcome_service_url'], xml, 'Content-Type' => 'application/xml')
+  response = token.post(SESSION['lis_outcome_service_url'], xml, 'Content-Type' => 'application/xml')
 
   headers 'Content-Type' => 'text'
   %{
